@@ -61,13 +61,4 @@ final class PoseTestViewModel {
                 ? "pose_model_missing" : "pose_failed"
         }
     }
-
-    func loadSample() async {
-        await load {
-            guard let url = Bundle.main.url(forResource: "pose_sample", withExtension: "jpg") else {
-                throw PoseError.invalidImage
-            }
-            return try Data(contentsOf: url)
-        }
-    }
 }

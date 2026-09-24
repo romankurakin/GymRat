@@ -1,58 +1,152 @@
+import AVFoundation
 import PhotosUI
 import SwiftUI
 
 struct PoseTestView: View {
     @State var viewModel: PoseTestViewModel
     @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showCamera = false
+    @State private var cameraAvailable = false
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                if let image = viewModel.image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .overlay {
-                            PoseSkeletonOverlay(landmarks: viewModel.landmarks)
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-                } else {
-                    ContentUnavailableView("pose_choose_photo", systemImage: "figure.stand",
-                                           description: Text("pose_photo_hint"))
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 16) {
+                    if let image = viewModel.image {
+                        photoPreview(image, availableSize: geometry.size)
+                    } else {
+                        ContentUnavailableView("pose_choose_photo", systemImage: "figure.stand",
+                                               description: Text("pose_photo_hint"))
+                            .frame(minHeight: geometry.size.height * 0.45)
+                    }
+
+                    if viewModel.isBusy { ProgressView() }
+                    Text(LocalizedStringKey(viewModel.messageKey))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("poseStatus")
+
+                    Text("pose_privacy_note")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
-
-                if viewModel.isBusy { ProgressView() }
-                Text(LocalizedStringKey(viewModel.messageKey))
-                    .multilineTextAlignment(.center)
-                    .accessibilityIdentifier("poseStatus")
-
-                PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                    Label("pose_choose_photo", systemImage: "photo.on.rectangle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("posePhotoPicker")
-                .disabled(viewModel.isBusy)
-
-                Button("pose_try_sample") {
-                    Task { await viewModel.loadSample() }
-                }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("poseSampleButton")
-                .disabled(viewModel.isBusy)
-
-                Text("pose_privacy_note")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(16)
             }
-            .padding()
+        }
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 4) {
+                HStack(spacing: 12) {
+                    PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                        Label("pose_choose_photo", systemImage: "photo.on.rectangle")
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("posePhotoPicker")
+                    .disabled(viewModel.isBusy)
+
+                    Button {
+                        showCamera = true
+                    } label: {
+                        Label("pose_take_photo", systemImage: "camera")
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("poseCameraButton")
+                    .disabled(viewModel.isBusy || !cameraAvailable)
+                }
+                .controlSize(.large)
+
+                if !cameraAvailable {
+                    Text("pose_camera_unavailable")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.regularMaterial)
         }
         .navigationTitle("pose_title")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear(perform: updateCameraAvailability)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { updateCameraAvailability() }
+        }
         .task(id: selectedPhoto) {
             guard let selectedPhoto else { return }
             await viewModel.load { try await selectedPhoto.loadTransferable(type: Data.self) }
+        }
+        .sheet(isPresented: $showCamera, onDismiss: updateCameraAvailability) {
+            PoseCameraPicker { image in
+                Task {
+                    await viewModel.load {
+                        await Task.detached(priority: .userInitiated) {
+                            image.jpegData(compressionQuality: 0.9)
+                        }.value
+                    }
+                }
+            }
+        }
+    }
+
+    private func updateCameraAvailability() {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        cameraAvailable = UIImagePickerController.isSourceTypeAvailable(.camera)
+            && AVCaptureDevice.default(for: .video) != nil
+            && status != .denied && status != .restricted
+    }
+
+    private func photoPreview(_ image: UIImage, availableSize: CGSize) -> some View {
+        let width = max(1, availableSize.width - 32)
+        let maxHeight = max(1, availableSize.height * 0.55)
+        let height = min(width * image.size.height / image.size.width, maxHeight)
+        let fittedWidth = height * image.size.width / image.size.height
+
+        return Image(uiImage: image)
+            .resizable()
+            .frame(width: fittedWidth, height: height)
+            .overlay { PoseSkeletonOverlay(landmarks: viewModel.landmarks) }
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .frame(maxWidth: .infinity)
+    }
+}
+
+private struct PoseCameraPicker: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+    let onPhoto: (UIImage) -> Void
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ controller: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        private let parent: PoseCameraPicker
+
+        init(_ parent: PoseCameraPicker) { self.parent = parent }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage {
+                parent.onPhoto(image)
+            }
+            parent.dismiss()
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.dismiss()
         }
     }
 }

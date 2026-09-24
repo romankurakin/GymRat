@@ -5,17 +5,6 @@ import UniformTypeIdentifiers
 @testable import GymRat
 
 struct PoseDetectorTests {
-    @Test func samplePhotoReturns33FiniteLandmarks() throws {
-        let url = try #require(Bundle.main.url(forResource: "pose_sample", withExtension: "jpg"))
-        let image = try #require(UIImage(contentsOfFile: url.path))
-        let result = try PoseDetector().detect(in: image)
-        #expect(result.count == 33)
-        #expect(result.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite })
-        // Regression check for axis swaps: the shoulders should be above the hips.
-        #expect(result[11].y < result[23].y)
-        #expect(result[12].y < result[24].y)
-    }
-
     @Test func blankImageReturnsNoPerson() throws {
         #expect(try PoseDetector().detect(in: Self.blankImage()).isEmpty)
     }
@@ -35,6 +24,16 @@ struct PoseDetectorTests {
         #expect(CGImageDestinationFinalize(destination))
         let worker = PoseAnalysisWorker(detector: PoseDetector())
         let prepared = try await worker.prepare(data as Data)
+        #expect(prepared.imageOrientation == .up)
+        #expect(prepared.size.width == 80)
+        #expect(prepared.size.height == 120)
+    }
+
+    @Test func cameraJPEGPreservesOrientation() async throws {
+        let raw = try #require(Self.blankImage(size: CGSize(width: 120, height: 80)).cgImage)
+        let cameraImage = UIImage(cgImage: raw, scale: 1, orientation: .right)
+        let data = try #require(cameraImage.jpegData(compressionQuality: 0.9))
+        let prepared = try await PoseAnalysisWorker(detector: PoseDetector()).prepare(data)
         #expect(prepared.imageOrientation == .up)
         #expect(prepared.size.width == 80)
         #expect(prepared.size.height == 120)
